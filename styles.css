@@ -57,6 +57,7 @@ canvas {
 .lg.key { color: var(--accent); }
 .lg.mk { color: var(--warn); }
 .lg.rc { color: var(--bad); }
+.lg.cc { color: #b16eff; }
 .lg.ok { color: var(--ok); }
 .lg.bad { color: var(--bad); }
 aside { flex: 1 1 340px; max-width: 460px; display: flex; flex-direction: column; gap: 10px; }
@@ -80,6 +81,7 @@ summary { cursor: pointer; font-weight: 600; color: #c9d4e0; }
 .item .tag { min-width: 26px; font-weight: 700; color: var(--accent); }
 .item .tag-m { color: var(--warn); }
 .item .tag-r { color: var(--bad); }
+.item .tag-c { color: #b16eff; }
 .item label { display: flex; gap: 4px; align-items: center; color: var(--muted); font-size: 12px; }
 .item input { width: 60px; background: #141a21; border: 1px solid #33404f; color: var(--text); border-radius: 4px; padding: 3px 6px; }
 .item input[data-field="tStr"] { width: 56px; }

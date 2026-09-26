@@ -146,3 +146,133 @@ test('checkScenario：全程安全', () => {
   assert.equal(r.ok, true);
   assert.equal(r.firstOcclusion, null);
 });
+
+/* ================= 圆区：连续精确判定（非多边形、非抽样） ================= */
+test('圆区扫描：相交区间端点为精确根式，接触点在圆周上', () => {
+  // 相机 (0,0)→(10,0)，标记 (5,10)，圆心 (5,5) 半径 2
+  // 解析解（光线从 (10u,0) 过 (5,10) 与圆相切）：
+  //   u± = 1/2 ∓ (2√21)/21；接触点 = (5 ∓ 4√21/21, 29/5)
+  const ivs = Geo.sweepCircleIntervals(P(0, 0), P(10, 0), P(5, 10), Geo.circleFrom(5, 5, 2));
+  assert.equal(ivs.length, 1);
+  const [v] = ivs;
+  assert.equal(v.tangent, false);
+  const wantLo = new Geo.Q2(F(1, 2), F(-2, 21), 21n);
+  const wantHi = new Geo.Q2(F(1, 2), F(2, 21), 21n);
+  assert.ok(Geo.Q2.eq(v.uMin, wantLo), `uMin=${Geo.Q2.from(v.uMin).toRadString()}`);
+  assert.ok(Geo.Q2.eq(v.uMax, wantHi), `uMax=${Geo.Q2.from(v.uMax).toRadString()}`);
+  // 接触点到圆心距离精确等于半径 2
+  const onCircle = (Pt2) => {
+    const dx = Pt2.x.sub(Geo.Q2.from(5n)), dy = Pt2.y.sub(Geo.Q2.from(5n));
+    return dx.mul(dx).add(dy.mul(dy)).eq(Geo.Q2.from(4n));
+  };
+  assert.ok(onCircle(v.contactMin));
+  assert.ok(onCircle(v.contactMax));
+  assert.ok(Geo.Q2.eq(v.contactMin.y, Geo.Q2.from(29n).div(Geo.Q2.from(5n))));
+});
+
+test('圆区扫描：视线与圆单点相切被精确捕获（抽样极易漏检）', () => {
+  // 相机 (−10,10)→(0,10)，标记 (0,0)，圆心 (3,5) 半径 3
+  // 仅在 u=1 时视线 x=0 与圆相切于 (0,5)；之前全程不相交
+  const ivs = Geo.sweepCircleIntervals(P(-10, 10), P(0, 10), P(0, 0), Geo.circleFrom(3, 5, 3));
+  assert.equal(ivs.length, 1);
+  const [v] = ivs;
+  assert.ok(v.tangent && eqF(v.uMin, 1) && eqF(v.uMax, 1));
+  assert.ok(Geo.Q2.eq(v.contactMin.x, Geo.Q2.from(0n)));
+  assert.ok(Geo.Q2.eq(v.contactMin.y, Geo.Q2.from(5n)));
+});
+
+test('圆区扫描：相机路径与圆相切（判别式恰为零）', () => {
+  // 相机 (0,0)→(10,0)，路径 y=0 与圆心 (5,3) r=3 在 u=1/2 单点相切
+  const ivs = Geo.sweepCircleIntervals(P(0, 0), P(10, 0), P(5, -10), Geo.circleFrom(5, 3, 3));
+  assert.equal(ivs.length, 1);
+  assert.ok(ivs[0].tangent && eqF(ivs[0].uMin, 1, 2));
+  assert.ok(eqF(Geo.Q2.from(ivs[0].contactMin.x).scalar(), 5));
+  assert.ok(eqF(Geo.Q2.from(ivs[0].contactMin.y).scalar(), 0));
+});
+
+test('圆区扫描：持续遮挡区间端点精确为有理数', () => {
+  // 相机 (−10,10)→(10,10)，标记 (0,0)，圆心 (0,5) 半径 3：
+  // 光线斜率为 (10)/(10u)=1/u 的解析推导给出相切 u = ±1/8（相对中心），即 [1/8, 7/8]
+  const ivs = Geo.sweepCircleIntervals(P(-10, 10), P(10, 10), P(0, 0), Geo.circleFrom(0, 5, 3));
+  assert.equal(ivs.length, 1);
+  const [v] = ivs;
+  assert.equal(v.tangent, false);
+  assert.ok(eqF(v.uMin, 1, 8) && eqF(v.uMax, 7, 8), `[${v.uMin}, ${v.uMax}]`);
+  assert.ok(Geo.Q2.eq(v.contactMin.x, Geo.Q2.from(-12n).div(Geo.Q2.from(5n))));
+  assert.ok(Geo.Q2.eq(v.contactMin.y, Geo.Q2.from(16n).div(Geo.Q2.from(5n))));
+  assert.ok(Geo.Q2.eq(v.contactMax.x, Geo.Q2.from(12n).div(Geo.Q2.from(5n))));
+  assert.ok(Geo.Q2.eq(v.contactMax.y, Geo.Q2.from(16n).div(Geo.Q2.from(5n))));
+});
+
+test('圆区扫描：相机静止（航段退化）', () => {
+  const hit = Geo.sweepCircleIntervals(P(0, 0), P(0, 0), P(10, 0), Geo.circleFrom(5, 0, 2));
+  assert.equal(hit.length, 1);
+  assert.ok(hit[0].stationary && eqF(hit[0].uMin, 0) && eqF(hit[0].uMax, 1));
+  const safe = Geo.sweepCircleIntervals(P(0, 0), P(0, 0), P(10, 0), Geo.circleFrom(20, 0, 1));
+  assert.equal(safe.length, 0);
+});
+
+test('圆区扫描：全程不相交返回空', () => {
+  const ivs = Geo.sweepCircleIntervals(P(0, 0), P(10, 0), P(5, 10), Geo.circleFrom(50, 50, 3));
+  assert.deepEqual(ivs, []);
+});
+
+test('圆区扫描：解析解端点附近逐点状态一致（连续性自检）', () => {
+  // 区间 [1/2∓2√21/21]：恰在区间外的两个有理时刻必安全，区间内中点必遮挡
+  const A = P(0, 0), B = P(10, 0), M = P(5, 10), C = Geo.circleFrom(5, 5, 2);
+  const ivs = Geo.sweepCircleIntervals(A, B, M, C);
+  const lo = ivs[0].uMin.toNumber(), hi = ivs[0].uMax.toNumber();
+  const stateAt = (u) => {
+    const Cam = { x: A.x.add(B.x.sub(A.x).mul(F(Math.round(u * 1e9), 1e9))), y: A.y };
+    return Geo.sightHitsCircle(Cam, M, C);
+  };
+  assert.equal(stateAt(lo - 0.01), false);
+  assert.equal(stateAt((lo + hi) / 2), true);
+  assert.equal(stateAt(hi + 0.01), false);
+});
+
+test('checkScenario：圆区最早遮挡证据（航段/标记/圆区/相机/圆周接触点）', () => {
+  // K1(0,0)@0 → K2(10,0)@2；M(5,10)；圆 (5,5) r=2
+  const parsed = {
+    keyframes: [{ t: F(0), p: P(0, 0) }, { t: F(2), p: P(10, 0) }],
+    markers: [P(5, 10)],
+    rects: [Geo.rectFrom(40, 40, 2, 2)], // 与本场景无关的矩形，保证矩形链路仍参与
+    circles: [Geo.circleFrom(5, 5, 2)],
+  };
+  const r = Geo.checkScenario(parsed);
+  assert.equal(r.ok, false);
+  const f = r.firstOcclusion;
+  assert.equal(f.kind, 'circle');
+  assert.equal(f.circleIndex, 0);
+  assert.equal(f.rectIndex, -1);
+  assert.equal(f.segmentIndex, 0);
+  assert.equal(f.markerIndex, 0);
+  // t = 0 + 2·uMin = 1 − 4√21/21
+  assert.ok(Geo.Q2.eq(f.t, new Geo.Q2(F(1), F(-4, 21), 21n)), `t=${Geo.Q2.from(f.t).toRadString()}`);
+  // 相机 x = 10·uMin = 5 − 20√21/21，y = 0
+  assert.ok(Geo.Q2.eq(f.camera.y, Geo.Q2.from(0n)));
+  // 接触点在圆周上
+  const dx = f.contact.x.sub(Geo.Q2.from(5n)), dy = f.contact.y.sub(Geo.Q2.from(5n));
+  assert.ok(dx.mul(dx).add(dy.mul(dy)).eq(Geo.Q2.from(4n)));
+});
+
+test('旧场景回归：无圆区时结论、区间与首项证据逐项不变', () => {
+  const mk = () => ({
+    keyframes: [{ t: F(0), p: P(0, 0) }, { t: F(2), p: P(10, 0) }, { t: F(4), p: P(10, 10) }],
+    markers: [P(5, 10), P(50, -50)],
+    rects: [Geo.rectFrom(4, 4, 2, 2), Geo.rectFrom(8, 4, 1, 2)],
+  });
+  const r1 = Geo.checkScenario(mk());           // 旧草稿：根本没有 circles 字段
+  const r2 = Geo.checkScenario({ ...mk(), circles: [] }); // 显式空圆区
+  assert.equal(r1.ok, false);
+  assert.equal(r1.ok, r2.ok);
+  assert.deepEqual(r1.firstOcclusion, r2.firstOcclusion);
+  for (let i = 0; i < r1.segments.length; i++) {
+    assert.deepEqual(r1.segments[i].byMarker, r2.segments[i].byMarker);
+    // 首项证据（矩形条目）坐标均为 Frac
+    for (const e of r1.segments[i].entries) {
+      assert.ok(e.tMin instanceof Geo.Frac && e.tMax instanceof Geo.Frac);
+      assert.ok(e.contactMin.x instanceof Geo.Frac);
+    }
+  }
+});
