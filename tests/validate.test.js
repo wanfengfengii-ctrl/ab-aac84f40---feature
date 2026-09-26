@@ -14,6 +14,7 @@ const baseRaw = () => ({
     { x: 150, y: 520 },
   ],
   rects: [{ x: 380, y: 140, w: 200, h: 120 }],
+  circles: [],
 });
 
 test('合法配置通过并给出解析结果', () => {
@@ -67,9 +68,41 @@ test('相机位置不得落在矩形内', () => {
 
 test('矩形尺寸与画布边界', () => {
   const r1 = baseRaw(); r1.rects[0].w = 0;
-  assert.ok(Validate.scenario(r1, OPTS).errors.length > 0);
+  assert.ok(Validate.scenario(r1, OPTS).errors.some((e) => e.includes('宽、高')));
   const r2 = baseRaw(); r2.rects[0].x = 950; r2.rects[0].w = 50;
   assert.ok(Validate.scenario(r2, OPTS).errors.some((e) => e.includes('超出')));
   const r3 = baseRaw(); r3.markers[0] = { x: 1000, y: 10 };
   assert.ok(Validate.scenario(r3, OPTS).errors.some((e) => e.includes('超出')));
+});
+
+test('圆形保护区为可选（0 个是合法旧草稿）', () => {
+  const v = Validate.scenario(baseRaw(), OPTS);
+  assert.deepEqual(v.errors, []);
+  assert.ok(v.parsed.circles && v.parsed.circles.length === 0);
+});
+
+test('圆形保护区最多 3 个', () => {
+  const r = baseRaw();
+  r.circles = [{ cx: 200, cy: 200, r: 20 }, { cx: 300, cy: 200, r: 20 },
+    { cx: 400, cy: 200, r: 20 }, { cx: 500, cy: 200, r: 20 }];
+  assert.ok(Validate.scenario(r, OPTS).errors.some((e) => e.includes('最多 3')));
+});
+
+test('圆形保护区半径与画布边界', () => {
+  const r1 = baseRaw(); r1.circles = [{ cx: 200, cy: 200, r: 2 }];
+  assert.ok(Validate.scenario(r1, OPTS).errors.some((e) => e.includes('半径')));
+  const r2 = baseRaw(); r2.circles = [{ cx: 30, cy: 200, r: 40 }];
+  assert.ok(Validate.scenario(r2, OPTS).errors.some((e) => e.includes('超出画布')));
+});
+
+test('标记点不得落在圆内或圆周上', () => {
+  const r1 = baseRaw(); r1.circles = [{ cx: 480, cy: 400, r: 20 }];
+  assert.ok(Validate.scenario(r1, OPTS).errors.some((e) => e.includes('M1') && e.includes('C1')));
+  const r2 = baseRaw(); r2.circles = [{ cx: 460, cy: 400, r: 20 }]; // 标记在圆周上
+  assert.ok(Validate.scenario(r2, OPTS).errors.some((e) => e.includes('圆周')));
+});
+
+test('关键帧相机位置不得落在圆内或圆周上', () => {
+  const r = baseRaw(); r.circles = [{ cx: 60, cy: 100, r: 20 }];
+  assert.ok(Validate.scenario(r, OPTS).errors.some((e) => e.includes('K1') && e.includes('C1')));
 });

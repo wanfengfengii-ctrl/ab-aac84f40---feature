@@ -1,6 +1,6 @@
 /*
- * app.js — 画布交互（关键帧/标记点/保护矩形的拖动与录入）、实时精确校核与证据展示。
- * 任何编辑都会立即重新校核：一旦移动中首次擦到保护边界，结论与首个遮挡证据即刻可见。
+ * app.js — 画布交互（关键帧/标记点/保护矩形/圆形保护区的拖动与录入）、实时精确校核与证据展示。
+ * 任何编辑都会立即重新校核：一旦移动中首次擦到保护矩形边界或圆周，结论与首个遮挡证据即刻可见。
  */
 (function () {
   'use strict';
@@ -18,28 +18,34 @@
   const $ = (id) => document.getElementById(id);
   const els = {
     verdict: $('verdict'), errors: $('errors'), evidence: $('evidence'), report: $('report'),
-    keyList: $('keyList'), markerList: $('markerList'), rectList: $('rectList'),
+    keyList: $('keyList'), markerList: $('markerList'), rectList: $('rectList'), circleList: $('circleList'),
     scrub: $('scrubT'), scrubLabel: $('scrubLabel'), scrubBox: $('scrubBox'), hint: $('hint'),
   };
 
   let uid = 1;
   let drag = null;
   const state = {
-    mode: 'select', keyframes: [], markers: [], rects: [],
+    mode: 'select', keyframes: [], markers: [], rects: [], circles: [],
     selected: null, result: null, parsed: null, errors: [], scrub: 0,
   };
 
   /* ---------------- 工具 ---------------- */
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = (f) => Geo.fmt(f);
-  const fmtP = (p) => `(${fmt(p.x)}, ${fmt(p.y)})`;
+  // 圆场景的时刻/坐标可能是二次根式 Rad：精确根式 + 近似；矩形场景仍是 Frac
+  const fmtV = (x) => (x instanceof Geo.Rad ? x.toString() : fmt(x));
+  const fmtE = (x) => (x instanceof Geo.Rad ? x.toString() : Geo.fmtFull(x));
+  const fmtP = (p) => `(${fmtE(p.x)}, ${fmtE(p.y)})`;
+  const numV = (x) => x.toNumber();
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
   function hint(msg) {
     els.hint.textContent = msg;
     if (msg) setTimeout(() => { if (els.hint.textContent === msg) els.hint.textContent = ''; }, 3500);
   }
   const findItem = (kind, id) => {
-    const arr = kind === 'keyframe' ? state.keyframes : kind === 'marker' ? state.markers : state.rects;
+    const arr = kind === 'keyframe' ? state.keyframes
+      : kind === 'marker' ? state.markers
+      : kind === 'rect' ? state.rects : state.circles;
     return arr.find((a) => a.id === id);
   };
 
@@ -48,6 +54,7 @@
     keyframes: state.keyframes.map((k) => ({ tStr: k.tStr, x: k.x, y: k.y })),
     markers: state.markers.map((m) => ({ x: m.x, y: m.y })),
     rects: state.rects.map((r) => ({ x: r.x, y: r.y, w: r.w, h: r.h })),
+    circles: state.circles.map((c) => ({ cx: c.cx, cy: c.cy, r: c.r })),
   });
 
   function recheck() {
@@ -56,9 +63,11 @@
     state.parsed = v.parsed;
     state.result = v.parsed ? Geo.checkScenario(v.parsed) : null;
     if (state.result && state.result.firstOcclusion) {
-      // 把时间轴定位到最早遮挡时刻，让摄影师立即看到首个证据
-      const r = state.result, span = r.t1.sub(r.t0);
-      state.scrub = span.isZero() ? 0 : r.firstOcclusion.t.sub(r.t0).toNumber() / span.toNumber();
+      // 把时间轴定位到最早遮挡时刻，让摄影师立即看到首个证据（圆场景首时刻可能是二次根式）
+      const r = state.result;
+      const span = r.t1.sub(r.t0).toNumber();
+      const ft = r.firstOcclusion.t.toNumber() - r.t0.toNumber();
+      state.scrub = span === 0 ? 0 : ft / span;
       els.scrub.value = String(Math.round(state.scrub * 1000));
     }
     renderPanels();
@@ -83,7 +92,8 @@
     const C = Geo.cameraAt(ks[i].p, ks[i + 1].p, u);
     const lines = state.parsed.markers.map((M, mi) => {
       const hits = [];
-      state.parsed.rects.forEach((R, ri) => { if (Geo.sweepInterval(C, C, M, R)) hits.push(ri); });
+      state.parsed.rects.forEach((R, ri) => { if (Geo.sweepInterval(C, C, M, R)) hits.push({ kind: 'rect', index: ri }); });
+      (state.parsed.circles || []).forEach((Cc, ci) => { if (Geo.circleSweep(C, C, M, Cc)) hits.push({ kind: 'circle', index: ci }); });
       return { mi, M, hits };
     });
     return { C, lines, segIndex: i, u };
@@ -110,36 +120,46 @@
     const f = r.firstOcclusion;
     const seg = r.segments[f.segmentIndex];
     const M = state.parsed.markers[f.markerIndex];
-    const R = state.parsed.rects[f.rectIndex];
+    const zone = f.kind === 'circle'
+      ? {
+          name: `圆形保护区 C${f.circleIndex + 1}`,
+          desc: (() => { const c = state.parsed.circles[f.circleIndex];
+            return `圆心（${fmt(c.cx)}, ${fmt(c.cy)}），半径 r = ${fmt(c.r)}`; })(),
+        }
+      : {
+          name: `保护矩形 R${f.rectIndex + 1}`,
+          desc: (() => { const R = state.parsed.rects[f.rectIndex];
+            return `x∈[${fmt(R.x1)}, ${fmt(R.x2)}]，y∈[${fmt(R.y1)}, ${fmt(R.y2)}]`; })(),
+        };
     els.evidence.innerHTML = `
       <div class="card danger">
-        <h3>最早遮挡证据（可复核）</h3>
+        <h3>最早遮挡证据（可复核）——${f.kind === 'circle' ? '圆形纹样保护区' : '保护矩形'}</h3>
         <ul>
-          <li>时刻：<b>t = ${esc(Geo.fmtFull(f.t))}</b>${f.tangent
-            ? '（<b>相切</b>：首次擦到保护边界）'
-            : `（进入遮挡区间 [${esc(fmt(f.t))}, ${esc(fmt(f.tMax))}]）`}</li>
+          <li>时刻：<b>t = ${esc(fmtE(f.t))}</b>${f.tangent
+            ? '（<b>相切</b>：首次擦到' + (f.kind === 'circle' ? '圆周' : '保护边界') + '）'
+            : `（进入遮挡区间 [${esc(fmtV(f.t))}, ${esc(fmtV(f.tMax))}]）`}</li>
           <li>航段：K${f.segmentIndex + 1} → K${f.segmentIndex + 2}（t ∈ [${esc(fmt(seg.t0))}, ${esc(fmt(seg.t1))}]）</li>
           <li>标记点：M${f.markerIndex + 1} ${esc(fmtP(M))}</li>
-          <li>保护矩形：R${f.rectIndex + 1}　x∈[${esc(fmt(R.x1))}, ${esc(fmt(R.x2))}]，y∈[${esc(fmt(R.y1))}, ${esc(fmt(R.y2))}]</li>
+          <li>${esc(zone.name)}：${esc(zone.desc)}</li>
           <li>相机位置：C(t) = ${esc(fmtP(f.camera))}</li>
-          <li>接触点（在矩形边界上）：${esc(fmtP(f.contact))}</li>
+          <li>${f.kind === 'circle' ? '圆周接触点' : '接触点（在矩形边界上）'}：${esc(fmtP(f.contact))}</li>
         </ul>
-        <p class="note">画布已用红色虚线绘制该时刻的相机位置、视线与接触点；拖动时间轴可逐时刻复核。</p>
+        <p class="note">结论：<b>该次曝光不可执行</b>。画布已用红色虚线绘制该时刻的相机位置、视线与${f.kind === 'circle' ? '圆周接触点' : '接触点'}；拖动时间轴可逐时刻复核。</p>
       </div>`;
   }
 
   function renderReport() {
     const r = state.result;
     if (!r) { els.report.innerHTML = '<p class="muted">完成有效配置后，此处自动给出每个航段、每条视线的安全区间。</p>'; return; }
-    const iv = (s) => `${s.fromClosed ? '[' : '('}${esc(fmt(s.from))}, ${esc(fmt(s.to))}${s.toClosed ? ']' : ')'}`;
+    const iv = (s) => `${s.fromClosed ? '[' : '('}${esc(fmtV(s.from))}, ${esc(fmtV(s.to))}${s.toClosed ? ']' : ')'}`;
     els.report.innerHTML = r.segments.map((seg) => {
       const rows = seg.byMarker.map((bm) => {
         if (!bm.occluded.length) return `<div class="row ok">M${bm.markerIndex + 1}：全程安全</div>`;
         const occ = bm.occluded.map((o) => {
-          const rs = o.rects.map((ri) => `R${ri + 1}`).join('/');
+          const names = [...o.rects.map((ri) => `R${ri + 1}`), ...o.circles.map((ci) => `C${ci + 1}`)].join('/');
           return o.tangent
-            ? `相切于 t = ${esc(fmt(o.tMin))}（${rs}）`
-            : `遮挡 [${esc(fmt(o.tMin))}, ${esc(fmt(o.tMax))}]（${rs}）`;
+            ? `相切于 t = ${esc(fmtV(o.tMin))}（${names}）`
+            : `遮挡 [${esc(fmtV(o.tMin))}, ${esc(fmtV(o.tMax))}]（${names}）`;
         }).join('；');
         const safe = bm.safe.length ? bm.safe.map(iv).join(' ∪ ') : '无';
         return `<div class="row bad">M${bm.markerIndex + 1}：${occ}<br><span class="safe">安全区间：${safe}</span></div>`;
@@ -174,6 +194,15 @@
         <label>高 <input type="number" data-kind="rect" data-id="${r.id}" data-field="h" value="${r.h}"></label>
         <button type="button" data-act="del" data-kind="rect" data-id="${r.id}" title="删除">×</button>
       </div>`).join('');
+    els.circleList.innerHTML = state.circles.map((c, i) => `
+      <div class="item ${selCls('circle', c.id)}">
+        <span class="tag tag-c">C${i + 1}</span>
+        <label>圆心x <input type="number" data-kind="circle" data-id="${c.id}" data-field="cx" value="${c.cx}"></label>
+        <label>圆心y <input type="number" data-kind="circle" data-id="${c.id}" data-field="cy" value="${c.cy}"></label>
+        <label>半径 <input type="number" min="4" data-kind="circle" data-id="${c.id}" data-field="r" value="${c.r}"></label>
+        <button type="button" data-act="del" data-kind="circle" data-id="${c.id}" title="删除">×</button>
+      </div>`).join('');
+    if (!state.circles.length) els.circleList.innerHTML = '<p class="muted small">（未添加；可点上方「＋ 圆形保护区」后在画布上拖动，最多 3 个）</p>';
   }
 
   // 拖动时同步右侧面板数值（不重渲染列表，避免输入框失焦）
@@ -190,8 +219,9 @@
     const t = scrubT();
     const info = instantInfo(t);
     const occ = info.lines.filter((l) => l.hits.length);
+    const hitName = (h) => (h.kind === 'circle' ? 'C' : 'R') + (h.index + 1);
     const occTxt = occ.length
-      ? '　⚠ 遮挡：' + occ.map((l) => `M${l.mi + 1}×${l.hits.map((r) => 'R' + (r + 1)).join('/')}`).join('，')
+      ? '　⚠ 遮挡：' + occ.map((l) => `M${l.mi + 1}×${l.hits.map(hitName).join('/')}`).join('，')
       : '　✓ 此时刻全部视线安全';
     els.scrubLabel.textContent = `t = ${Geo.fmtFull(t)}（航段 K${info.segIndex + 1}→K${info.segIndex + 2}）` + occTxt;
   }
@@ -202,12 +232,16 @@
     drawGrid();
     drawPath();
     state.rects.forEach((r, i) => drawRect(r, i));
+    state.circles.forEach((c, i) => drawCircle(c, i));
     drawAllContacts();
     drawScrubLines();
     state.markers.forEach((m, i) => drawMarker(m, i));
     state.keyframes.forEach((k, i) => drawKey(k, i));
     drawEvidence();
-    if (drag && drag.type === 'create') drawGhostRect(drag);
+    if (drag && drag.type === 'create') {
+      if (drag.shape === 'circle') drawGhostCircle(drag);
+      else drawGhostRect(drag);
+    }
   }
 
   function drawGrid() {
@@ -273,12 +307,39 @@
     ctx.restore();
   }
 
+  function drawCircle(c, i) {
+    const sel = state.selected && state.selected.kind === 'circle' && state.selected.id === c.id;
+    ctx.save();
+    ctx.beginPath(); ctx.arc(c.cx, c.cy, c.r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(200,120,255,0.12)'; ctx.fill();
+    ctx.lineWidth = 2; ctx.setLineDash([7, 4]);
+    ctx.strokeStyle = sel ? '#ffd84d' : '#d28aff'; ctx.stroke();
+    ctx.setLineDash([]);
+    // 圆心小十字
+    ctx.strokeStyle = sel ? '#ffd84d' : '#d28aff'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(c.cx - 5, c.cy); ctx.lineTo(c.cx + 5, c.cy);
+    ctx.moveTo(c.cx, c.cy - 5); ctx.lineTo(c.cx, c.cy + 5);
+    ctx.stroke();
+    ctx.fillStyle = '#e3b8ff'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+    ctx.fillText(`C${i + 1}（r=${c.r}）`, c.cx + c.r * 0.707 + 3, c.cy - c.r * 0.707 - 2);
+    // 半径手柄（右边缘）
+    if (sel) {
+      ctx.fillStyle = '#ffd84d';
+      ctx.beginPath(); ctx.arc(c.cx + c.r, c.cy, 5, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
   function drawAllContacts() {
     const r = state.result;
     if (!r) return;
-    ctx.save(); ctx.fillStyle = 'rgba(255,90,90,0.9)';
+    ctx.save();
     for (const seg of r.segments) for (const e of seg.entries) {
-      ctx.beginPath(); ctx.arc(e.contactMin.x.toNumber(), e.contactMin.y.toNumber(), 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = e.kind === 'circle' ? 'rgba(224,170,255,0.95)' : 'rgba(255,90,90,0.9)';
+      for (const cp of [e.contactMin]) {
+        ctx.beginPath(); ctx.arc(numV(cp.x), numV(cp.y), 3, 0, Math.PI * 2); ctx.fill();
+      }
     }
     ctx.restore();
   }
@@ -305,20 +366,33 @@
     if (!r || !r.firstOcclusion) return;
     const f = r.firstOcclusion;
     const M = state.parsed.markers[f.markerIndex];
-    const cx = f.camera.x.toNumber(), cy = f.camera.y.toNumber();
+    const cx = numV(f.camera.x), cy = numV(f.camera.y);
     const mx = M.x.toNumber(), my = M.y.toNumber();
-    const px = f.contact.x.toNumber(), py = f.contact.y.toNumber();
+    const px = numV(f.contact.x), py = numV(f.contact.y);
+    const col = f.kind === 'circle' ? '#d28aff' : '#ff5a5a';
     ctx.save();
-    ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 2.5; ctx.setLineDash([8, 5]);
+    ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.setLineDash([8, 5]);
     ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(mx, my); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.beginPath(); ctx.arc(cx, cy, 8, 0, Math.PI * 2); ctx.strokeStyle = '#ff5a5a'; ctx.lineWidth = 2.5; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, 8, 0, Math.PI * 2); ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.stroke();
     ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.strokeStyle = '#ffd84d'; ctx.lineWidth = 2.5; ctx.stroke();
     ctx.beginPath();
     ctx.moveTo(px - 9, py); ctx.lineTo(px + 9, py); ctx.moveTo(px, py - 9); ctx.lineTo(px, py + 9);
     ctx.stroke();
     ctx.fillStyle = '#ffd84d'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-    ctx.fillText(`首次遮挡 t=${fmt(f.t)}`, clamp(px + 10, 4, W - 130), clamp(py - 10, 14, H - 4));
+    ctx.fillText(`首次遮挡 t=${fmtV(f.t)}`, clamp(px + 10, 4, W - 130), clamp(py - 10, 14, H - 4));
+    ctx.restore();
+  }
+
+  function drawGhostCircle(d) {
+    const rr = Math.hypot(d.anchor.x - d.cur.x, d.anchor.y - d.cur.y);
+    ctx.save();
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = '#d28aff';
+    ctx.beginPath(); ctx.arc(d.anchor.x, d.anchor.y, rr, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(d.anchor.x - 6, d.anchor.y); ctx.lineTo(d.anchor.x + 6, d.anchor.y);
+    ctx.moveTo(d.anchor.x, d.anchor.y - 6); ctx.lineTo(d.anchor.x, d.anchor.y + 6);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -342,6 +416,10 @@
       const r = findItem('rect', state.selected.id);
       if (r && Math.abs(p.x - (r.x + r.w)) <= 8 && Math.abs(p.y - (r.y + r.h)) <= 8) return { kind: 'rect-handle', id: r.id };
     }
+    if (state.selected && state.selected.kind === 'circle') {
+      const c = findItem('circle', state.selected.id);
+      if (c && Math.abs(Math.hypot(p.x - c.cx, p.y - c.cy) - c.r) <= 7) return { kind: 'circle-handle', id: c.id };
+    }
     for (let i = state.keyframes.length - 1; i >= 0; i--) {
       const k = state.keyframes[i];
       if (Math.hypot(p.x - k.x, p.y - k.y) <= 12) return { kind: 'keyframe', id: k.id };
@@ -353,6 +431,10 @@
     for (let i = state.rects.length - 1; i >= 0; i--) {
       const r = state.rects[i];
       if (p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h) return { kind: 'rect', id: r.id };
+    }
+    for (let i = state.circles.length - 1; i >= 0; i--) {
+      const c = state.circles[i];
+      if (Math.hypot(p.x - c.cx, p.y - c.cy) <= c.r) return { kind: 'circle', id: c.id };
     }
     return null;
   }
@@ -372,13 +454,18 @@
     }
     if (state.mode === 'rect') {
       if (state.rects.length >= 4) return hint('最多 4 个保护矩形');
-      drag = { type: 'create', anchor: p, cur: p }; return;
+      drag = { type: 'create', shape: 'rect', anchor: p, cur: p }; return;
+    }
+    if (state.mode === 'circle') {
+      if (state.circles.length >= 3) return hint('最多 3 个圆形脆弱纹样保护区');
+      drag = { type: 'create', shape: 'circle', anchor: p, cur: p }; return;
     }
     const hit = hitTest(p);
     if (hit) {
-      state.selected = { kind: hit.kind === 'rect-handle' ? 'rect' : hit.kind, id: hit.id };
-      drag = hit.kind === 'rect-handle'
-        ? { type: 'resize', id: hit.id }
+      const baseKind = hit.kind === 'rect-handle' ? 'rect' : hit.kind === 'circle-handle' ? 'circle' : hit.kind;
+      state.selected = { kind: baseKind, id: hit.id };
+      drag = hit.kind === 'rect-handle' || hit.kind === 'circle-handle'
+        ? { type: 'resize', shape: baseKind, id: hit.id, last: p }
         : { type: 'move', kind: hit.kind, id: hit.id, last: p };
     } else {
       state.selected = null;
@@ -396,14 +483,23 @@
       const dx = p.x - drag.last.x, dy = p.y - drag.last.y;
       drag.last = p;
       if (drag.kind === 'rect') { it.x = clamp(it.x + dx, 0, W - it.w); it.y = clamp(it.y + dy, 0, H - it.h); }
-      else { it.x = clamp(it.x + dx, 0, W); it.y = clamp(it.y + dy, 0, H); }
+      else if (drag.kind === 'circle') {
+        it.cx = clamp(it.cx + dx, it.r, W - it.r); it.cy = clamp(it.cy + dy, it.r, H - it.r);
+      } else { it.x = clamp(it.x + dx, 0, W); it.y = clamp(it.y + dy, 0, H); }
       syncInputs(); recheck(); return;
     }
     if (drag.type === 'resize') {
-      const r = findItem('rect', drag.id);
-      if (!r) return;
-      r.w = clamp(p.x - r.x, 8, W - r.x);
-      r.h = clamp(p.y - r.y, 8, H - r.y);
+      if (drag.shape === 'rect') {
+        const r = findItem('rect', drag.id);
+        if (!r) return;
+        r.w = clamp(p.x - r.x, 8, W - r.x);
+        r.h = clamp(p.y - r.y, 8, H - r.y);
+      } else {
+        const c = findItem('circle', drag.id);
+        if (!c) return;
+        c.r = clamp(Math.round(Math.hypot(p.x - c.cx, p.y - c.cy)), 4,
+          Math.min(c.cx, W - c.cx, c.cy, H - c.cy));
+      }
       syncInputs(); recheck();
     }
   });
@@ -411,13 +507,23 @@
   cv.addEventListener('pointerup', () => {
     if (drag && drag.type === 'create') {
       const a = drag.anchor, b = drag.cur;
-      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
-      const w = Math.abs(a.x - b.x), h = Math.abs(a.y - b.y);
-      if (w >= 8 && h >= 8) {
-        const r = { id: uid++, x, y, w, h };
-        state.rects.push(r);
-        state.selected = { kind: 'rect', id: r.id };
-      } else hint('矩形太小，未创建');
+      if (drag.shape === 'circle') {
+        const r = Math.round(Math.hypot(a.x - b.x, a.y - b.y));
+        if (r >= 8) {
+          const rr = clamp(r, 4, Math.min(a.x, W - a.x, a.y, H - a.y));
+          const c = { id: uid++, cx: a.x, cy: a.y, r: rr };
+          state.circles.push(c);
+          state.selected = { kind: 'circle', id: c.id };
+        } else hint('拖动距离太短，未创建（拖出半径至少 8；也可创建后在右侧精确录入 ≥4）');
+      } else {
+        const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+        const w = Math.abs(a.x - b.x), h = Math.abs(a.y - b.y);
+        if (w >= 8 && h >= 8) {
+          const r = { id: uid++, x, y, w, h };
+          state.rects.push(r);
+          state.selected = { kind: 'rect', id: r.id };
+        } else hint('矩形太小，未创建');
+      }
     }
     drag = null;
     renderLists(); recheck();
@@ -439,6 +545,7 @@
       keyframe: '在画布上点击放置相机关键帧（2–4 个）',
       marker: '在画布上点击放置标记点（2–6 个）',
       rect: '在画布上按住拖拽画出保护矩形（1–4 个）',
+      circle: '按住拖拽：按下处为圆心，拖出距离为半径（圆形保护区 0–3 个）',
       select: '',
     }[m] || '');
   }
@@ -447,7 +554,9 @@
   function deleteSelected() {
     const s = state.selected;
     if (!s) return;
-    const arr = s.kind === 'keyframe' ? state.keyframes : s.kind === 'marker' ? state.markers : state.rects;
+    const arr = s.kind === 'keyframe' ? state.keyframes
+      : s.kind === 'marker' ? state.markers
+      : s.kind === 'rect' ? state.rects : state.circles;
     const i = arr.findIndex((a) => a.id === s.id);
     if (i >= 0) arr.splice(i, 1);
     state.selected = null;
@@ -456,7 +565,7 @@
 
   $('btnDelete').addEventListener('click', deleteSelected);
   $('btnClear').addEventListener('click', () => {
-    state.keyframes = []; state.markers = []; state.rects = []; state.selected = null;
+    state.keyframes = []; state.markers = []; state.rects = []; state.circles = []; state.selected = null;
     renderLists(); recheck();
   });
   $('btnSample').addEventListener('click', loadSample);
@@ -490,7 +599,9 @@
   document.querySelector('aside').addEventListener('click', (e) => {
     const b = e.target.closest('button');
     if (!b || b.dataset.act !== 'del') return;
-    const arr = b.dataset.kind === 'keyframe' ? state.keyframes : b.dataset.kind === 'marker' ? state.markers : state.rects;
+    const arr = b.dataset.kind === 'keyframe' ? state.keyframes
+      : b.dataset.kind === 'marker' ? state.markers
+      : b.dataset.kind === 'rect' ? state.rects : state.circles;
     const i = arr.findIndex((a) => a.id === Number(b.dataset.id));
     if (i >= 0) arr.splice(i, 1);
     if (state.selected && state.selected.id === Number(b.dataset.id)) state.selected = null;
@@ -512,9 +623,12 @@
       { x: 380, y: 140, w: 200, h: 120 },
       { x: 700, y: 300, w: 120, h: 90 },
     ].map((r) => ({ id: uid++, ...r }));
+    state.circles = [
+      { cx: 250, cy: 300, r: 40 },
+    ].map((c) => ({ id: uid++, ...c }));
     state.selected = null;
     renderLists(); recheck();
-    hint('已载入示例：存在遮挡，最早证据见右侧面板；可拖动元素观察实时校核');
+    hint('已载入示例：圆形纹样保护区 C1 造成最早遮挡（接触圆周，时刻含根式精确解），证据见右侧面板');
   }
 
   setMode('select');
